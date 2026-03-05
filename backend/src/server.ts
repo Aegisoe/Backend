@@ -2,6 +2,7 @@ import express, { Request, Response, NextFunction } from "express";
 import * as crypto from "crypto";
 import * as dotenv from "dotenv";
 import { scanDiffForSecrets } from "./detection/regexScanner";
+import { classifyWithLLM } from "./detection/llmClassifier";
 import { triggerCREWorkflow } from "./cre/triggerWorkflow";
 import { shouldAutoRotate } from "./policy/policyChecker";
 import { encodeSecretId } from "./aegisoeTypes";
@@ -172,25 +173,42 @@ async function processWebhook(
   }
 
   console.log(`\n🚨 SECRET DETECTED`);
-  console.log(`   Type    : ${scanResult.secretType}`);
-  console.log(`   Entropy : ${scanResult.entropy?.toFixed(2)} bits/char`);
+  console.log(`   Step 1  : Regex match — ${scanResult.secretType}`);
+  console.log(`   Step 2  : Entropy — ${scanResult.entropy?.toFixed(2)} bits/char`);
 
-  // 7. Generate secretId — keccak256 (match SC & CRE Step 8)
+  // 7. LLM Classification (Step 3) — final check sebelum trigger CRE
+  const llmResult = await classifyWithLLM(
+    scanResult.matchedValue || "",
+    scanResult.secretType || "generic",
+    fullDiff
+  );
+
+  console.log(`   Step 3  : LLM — ${llmResult.riskLevel} (${llmResult.mode})`);
+  console.log(`   Reason  : ${llmResult.reasoning}`);
+
+  // Jika LLM bilang bukan leak → skip
+  if (!llmResult.isLeak) {
+    console.log("✅ LLM classified as NOT a leak — skipping");
+    return;
+  }
+
+  // 8. Generate secretId — keccak256 (match SC & CRE Step 8)
   const secretId = encodeSecretId(scanResult.secretType || "generic", repo);
 
-  // 8. Catat incident
+  // 9. Catat incident
   const incident: Incident = {
     id: commitSha.substring(0, 8),
     repo,
     commitSha,
     secretType: scanResult.secretType || "unknown",
     status: "detected",
+    riskLevel: llmResult.riskLevel,
     detectedAt: new Date().toISOString(),
     creTriggered: false,
   };
   incidents.push(incident);
 
-  // 9. Policy check
+  // 10. Policy check — gunakan risk level dari LLM
   const policy = shouldAutoRotate(scanResult.secretType || "generic");
 
   if (!policy.autoRotate) {

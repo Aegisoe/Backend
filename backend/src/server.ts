@@ -4,6 +4,7 @@ import * as dotenv from "dotenv";
 import { scanDiffForSecrets } from "./detection/regexScanner";
 import { triggerCREWorkflow } from "./cre/triggerWorkflow";
 import { shouldAutoRotate } from "./policy/policyChecker";
+import { encodeSecretId } from "./aegisoeTypes";
 
 dotenv.config();
 
@@ -174,13 +175,8 @@ async function processWebhook(
   console.log(`   Type    : ${scanResult.secretType}`);
   console.log(`   Entropy : ${scanResult.entropy?.toFixed(2)} bits/char`);
 
-  // 7. Generate secretId (hash dari secret name + repo, bukan nilai secret)
-  const secretId =
-    "0x" +
-    crypto
-      .createHash("sha256")
-      .update(`${scanResult.secretType}_${repo}`)
-      .digest("hex");
+  // 7. Generate secretId — keccak256 (match SC & CRE Step 8)
+  const secretId = encodeSecretId(scanResult.secretType || "generic", repo);
 
   // 8. Catat incident
   const incident: Incident = {

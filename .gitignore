@@ -3,3 +3,11 @@ dist/
 .env
 *.log
 .vscode/
+
+# Folder terpisah — jangan push ke repo Backend
+SmartContract/
+aegisoe-cre/
+cre/
+Frontend/
+DEMO_GUIDE.md
+exit

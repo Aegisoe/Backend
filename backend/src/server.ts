@@ -87,6 +87,41 @@ function verifyGitHubSignature(
   }
 }
 
+// ── GitHub API: fetch real commit diff ──────────────────────────
+
+async function fetchCommitDiff(
+  repo: string,
+  commitSha: string
+): Promise<string | null> {
+  const token = process.env.GITHUB_API_TOKEN;
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github.diff",
+    "User-Agent": "AEGISOE-Backend/1.0",
+  };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  try {
+    const url = `https://api.github.com/repos/${repo}/commits/${commitSha}`;
+    console.log(`   📡 Fetching diff: GET ${url}`);
+
+    const response = await fetch(url, { headers });
+
+    if (!response.ok) {
+      console.warn(`   ⚠️  GitHub API ${response.status} — falling back to metadata scan`);
+      return null;
+    }
+
+    const diff = await response.text();
+    console.log(`   ✅ Got real diff (${diff.length} chars)`);
+    return diff;
+  } catch (err: any) {
+    console.warn(`   ⚠️  GitHub API error: ${err.message} — falling back to metadata scan`);
+    return null;
+  }
+}
+
 // ── Routes ───────────────────────────────────────────────────────
 
 // Health check
@@ -364,27 +399,33 @@ async function processWebhook(
   commitSha: string,
   payload: any
 ): Promise<void> {
-  // Kumpulkan semua diff dari commits
-  const allDiffs: string[] = [];
+  // ── Fetch real diff from GitHub API ──────────────────────────
+  // Coba ambil diff asli dari GitHub API (butuh isi file, bukan cuma metadata)
+  let fullDiff: string | null = null;
 
   for (const commit of payload.commits || []) {
-    // Gabungkan added + modified files sebagai simple text scan
-    const addedFiles = commit.added || [];
-    const modifiedFiles = commit.modified || [];
-    const allFiles = [...addedFiles, ...modifiedFiles];
-
-    // Untuk demo: gunakan commit message + file names sebagai simulasi diff
-    // Di production: fetch actual diff via GitHub API
-    const simulatedDiff = `
-      commit: ${commit.id}
-      message: ${commit.message}
-      files: ${allFiles.join(", ")}
-      added_lines: ${commit.added?.join(" ") || ""}
-    `;
-    allDiffs.push(simulatedDiff);
+    const realDiff = await fetchCommitDiff(repo, commit.id || commitSha);
+    if (realDiff) {
+      fullDiff = (fullDiff || "") + "\n" + realDiff;
+    }
   }
 
-  const fullDiff = allDiffs.join("\n");
+  // Fallback: jika GitHub API gagal, gunakan metadata dari webhook payload
+  if (!fullDiff) {
+    console.log("   ℹ️  Using webhook metadata fallback (no GitHub API diff)");
+    const metaDiffs: string[] = [];
+    for (const commit of payload.commits || []) {
+      const addedFiles = commit.added || [];
+      const modifiedFiles = commit.modified || [];
+      const allFiles = [...addedFiles, ...modifiedFiles];
+      metaDiffs.push(`
+        commit: ${commit.id}
+        message: ${commit.message}
+        files: ${allFiles.join(", ")}
+      `);
+    }
+    fullDiff = metaDiffs.join("\n");
+  }
 
   // 6. Pre-filter: quick regex scan sebelum trigger CRE
   const scanResult = scanDiffForSecrets(fullDiff);

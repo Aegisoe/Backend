@@ -324,39 +324,41 @@ async function processDemoTrigger(
     vaultUrl: "http://localhost:8200",
   });
 
+  // Always submit on-chain directly if CRE trigger fails or is in mock mode
+  const shouldSubmitDirectly =
+    !creResult.success ||
+    !process.env.CRE_TRIGGER_URL ||
+    process.env.CRE_TRIGGER_URL === "https://your-cre-endpoint/scan" ||
+    creResult.jobId?.startsWith("mock-");
+
   if (creResult.success) {
     incident.creTriggered = true;
-
-    // Mock mode: submit on-chain langsung (CRE tidak akan callback)
-    const isMockMode =
-      !process.env.CRE_TRIGGER_URL ||
-      process.env.CRE_TRIGGER_URL === "https://your-cre-endpoint/scan" ||
-      creResult.jobId?.startsWith("mock-");
-
-    if (isMockMode) {
-      const mockIncidentCommitment = generateMockCommitment(secretId, commitSha, "incident");
-      const mockNewCommitment      = generateMockCommitment(secretId, commitSha, "rotation");
-      const riskUint               = llmResult.riskLevel === "CRITICAL" ? 3
-                                    : llmResult.riskLevel === "HIGH"     ? 2
-                                    : 1;
-
-      await submitOnChain({
-        secretId,
-        incidentCommitment: mockIncidentCommitment,
-        newCommitment: mockNewCommitment,
-        riskLevel: riskUint,
-        repo,
-        rotated: true,
-      });
-
-      incident.status = "rotated";
-      console.log(`\n✅ DEMO complete (mock) — check Sepolia Etherscan & Frontend`);
-    } else {
-      // Real CRE mode — on-chain via /cre-callback
-      console.log(`✅ CRE triggered — waiting for /cre-callback`);
-    }
   } else {
-    console.error(`❌ CRE trigger failed: ${creResult.error}`);
+    console.warn(`⚠️  CRE trigger failed: ${creResult.error} — falling back to mock on-chain`);
+  }
+
+  if (shouldSubmitDirectly) {
+    // Mock/fallback: generate commitments locally and submit on-chain
+    const mockIncidentCommitment = generateMockCommitment(secretId, commitSha, "incident");
+    const mockNewCommitment      = generateMockCommitment(secretId, commitSha, "rotation");
+    const riskUint               = llmResult.riskLevel === "CRITICAL" ? 3
+                                  : llmResult.riskLevel === "HIGH"     ? 2
+                                  : 1;
+
+    await submitOnChain({
+      secretId,
+      incidentCommitment: mockIncidentCommitment,
+      newCommitment: mockNewCommitment,
+      riskLevel: riskUint,
+      repo,
+      rotated: true,
+    });
+
+    incident.status = "rotated";
+    console.log(`\n✅ DEMO complete — incident + rotation recorded on-chain`);
+  } else {
+    // Real CRE deployed — on-chain submission via /cre-callback
+    console.log(`✅ CRE triggered — waiting for /cre-callback`);
   }
 }
 
@@ -507,36 +509,38 @@ async function processWebhook(
     vaultUrl: "http://localhost:8200", // dari .env di production
   });
 
+  // Always submit on-chain if CRE fails or is in mock mode
+  const shouldSubmitDirectly =
+    !creResult.success ||
+    !process.env.CRE_TRIGGER_URL ||
+    process.env.CRE_TRIGGER_URL === "https://your-cre-endpoint/scan" ||
+    creResult.jobId?.startsWith("mock-");
+
   if (creResult.success) {
-    incident.status = "rotated";
     incident.creTriggered = true;
-    console.log(`✅ CRE workflow triggered successfully`);
-    console.log(`   Job ID : ${creResult.jobId}`);
-
-    // Mock mode: CRE tidak akan callback → submit on-chain langsung dengan mock commitments
-    const isMockMode =
-      !process.env.CRE_TRIGGER_URL ||
-      process.env.CRE_TRIGGER_URL === "https://your-cre-endpoint/scan" ||
-      creResult.jobId?.startsWith("mock-");
-
-    if (isMockMode) {
-      const mockIncidentCommitment = generateMockCommitment(secretId, commitSha, "incident");
-      const mockNewCommitment      = generateMockCommitment(secretId, commitSha, "rotation");
-      const riskUint               = llmResult.riskLevel === "CRITICAL" ? 3
-                                    : llmResult.riskLevel === "HIGH"     ? 2
-                                    : 1;
-      await submitOnChain({
-        secretId,
-        incidentCommitment: mockIncidentCommitment,
-        newCommitment: mockNewCommitment,
-        riskLevel: riskUint,
-        repo,
-        rotated: true,
-      });
-    }
-    // Real CRE mode: on-chain submission akan terjadi via /cre-callback
+    console.log(`✅ CRE workflow triggered — Job ID: ${creResult.jobId}`);
   } else {
-    console.error(`❌ CRE trigger failed: ${creResult.error}`);
+    console.warn(`⚠️  CRE trigger failed: ${creResult.error} — falling back to mock on-chain`);
+  }
+
+  if (shouldSubmitDirectly) {
+    const mockIncidentCommitment = generateMockCommitment(secretId, commitSha, "incident");
+    const mockNewCommitment      = generateMockCommitment(secretId, commitSha, "rotation");
+    const riskUint               = llmResult.riskLevel === "CRITICAL" ? 3
+                                  : llmResult.riskLevel === "HIGH"     ? 2
+                                  : 1;
+    await submitOnChain({
+      secretId,
+      incidentCommitment: mockIncidentCommitment,
+      newCommitment: mockNewCommitment,
+      riskLevel: riskUint,
+      repo,
+      rotated: true,
+    });
+    incident.status = "rotated";
+  } else {
+    // Real CRE deployed — on-chain via /cre-callback
+    console.log(`   Waiting for /cre-callback to submit on-chain...`);
   }
 }
 

@@ -228,6 +228,20 @@ async function fetchRepoTree(
   return data.tree;
 }
 
+async function fetchDefaultBranch(
+  owner: string,
+  repo: string,
+  token?: string
+): Promise<string> {
+  const url = `https://api.github.com/repos/${owner}/${repo}`;
+  const response = await fetch(url, { headers: githubHeaders(token) });
+
+  if (!response.ok) return "main"; // fallback
+
+  const data = (await response.json()) as { default_branch?: string };
+  return data.default_branch || "main";
+}
+
 async function fetchFileContent(
   owner: string,
   repo: string,
@@ -296,7 +310,6 @@ function getExtension(filename: string): string | null {
 export async function scanRepository(options: RepoScanOptions): Promise<RepoScanResult> {
   const startTime = Date.now();
   const maxFiles = options.maxFiles || 50;
-  const branch = options.branch || "main";
   const token = options.token || process.env.GITHUB_API_TOKEN;
 
   // 1. Parse URL
@@ -305,7 +318,7 @@ export async function scanRepository(options: RepoScanOptions): Promise<RepoScan
     return {
       status: "error",
       repo: options.repoUrl,
-      branch,
+      branch: options.branch || "main",
       scanDuration: Date.now() - startTime,
       totalFilesScanned: 0,
       totalFilesInRepo: 0,
@@ -317,6 +330,10 @@ export async function scanRepository(options: RepoScanOptions): Promise<RepoScan
   }
 
   const { owner, repo } = parsed;
+
+  // 2. Auto-detect default branch if not specified
+  const branch = options.branch || await fetchDefaultBranch(owner, repo, token);
+
   const repoFullName = `${owner}/${repo}`;
   console.log(`\n🔍 REPO SCANNER — Scanning ${repoFullName}@${branch}`);
 

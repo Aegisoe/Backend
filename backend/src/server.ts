@@ -31,6 +31,19 @@ interface Incident {
 
 const incidents: Incident[] = [];
 
+// ── Pending CRE payloads (untuk CRE simulate lokal) ─────────────
+interface CREPendingPayload {
+  secretType: string;
+  matchedValue: string;
+  riskLevel: string;
+  repo: string;
+  commitSha: string;
+  secretId: string;
+  createdAt: string;
+}
+
+const crePendingQueue: CREPendingPayload[] = [];
+
 // ── Middleware ───────────────────────────────────────────────────
 
 // Raw body parser khusus untuk webhook (HMAC butuh raw body)
@@ -135,6 +148,167 @@ app.get("/incidents", (_req: Request, res: Response) => {
     incidents: incidents.slice().reverse(), // newest first
   });
 });
+
+// ── CRE Pending Queue — untuk CRE simulate lokal ────────────────
+// GET: ambil payload terbaru untuk di-feed ke `cre workflow simulate`
+app.get("/cre/pending", (_req: Request, res: Response) => {
+  if (crePendingQueue.length === 0) {
+    res.json({ pending: 0, payload: null });
+    return;
+  }
+  // Ambil yang paling baru (LIFO) tanpa hapus — bisa dipakai berulang
+  const latest = crePendingQueue[crePendingQueue.length - 1];
+  res.json({ pending: crePendingQueue.length, payload: latest });
+});
+
+// DELETE: pop & consume satu payload dari queue
+app.delete("/cre/pending", (_req: Request, res: Response) => {
+  const consumed = crePendingQueue.shift();
+  res.json({
+    consumed: consumed || null,
+    remaining: crePendingQueue.length,
+  });
+});
+
+// ── Demo Trigger — untuk juri / testing tanpa GitHub webhook ────
+// Simulasikan push event dengan leaked secret tanpa perlu HMAC signature
+app.post("/demo/trigger", async (req: Request, res: Response) => {
+  const {
+    secretType = "openai",
+    secretValue = "sk-proj-DEMO1234567890abcdefghijklmnopqrstuvwxyz",
+    repo = "Aegisoe/demo-repo",
+    commitSha = crypto.randomBytes(20).toString("hex"),
+  } = req.body || {};
+
+  console.log(`\n🎯 DEMO TRIGGER received`);
+  console.log(`   SecretType : ${secretType}`);
+  console.log(`   Repo       : ${repo}`);
+  console.log(`   CommitSha  : ${commitSha}`);
+
+  // Langsung jalankan pipeline detection → on-chain (skip HMAC)
+  const simulatedDiff = `
+    commit: ${commitSha}
+    message: feat: add API integration
+    files: config/secrets.js
+    added_lines: const API_KEY = "${secretValue}";
+  `;
+
+  res.status(200).json({
+    message: "Demo triggered — processing pipeline...",
+    commitSha,
+    secretType,
+    repo,
+  });
+
+  // Jalankan async pipeline
+  processDemoTrigger(simulatedDiff, repo, commitSha).catch((err) => {
+    console.error("❌ Demo trigger error:", err.message);
+  });
+});
+
+async function processDemoTrigger(
+  diff: string,
+  repo: string,
+  commitSha: string
+): Promise<void> {
+  // Step 1-2: Regex + Entropy scan
+  const scanResult = scanDiffForSecrets(diff);
+
+  if (!scanResult.hasSecret) {
+    console.log("❌ Demo: no secret detected in simulated diff");
+    return;
+  }
+
+  console.log(`\n🚨 DEMO — SECRET DETECTED`);
+  console.log(`   Step 1  : Regex match — ${scanResult.secretType}`);
+  console.log(`   Step 2  : Entropy — ${scanResult.entropy?.toFixed(2)} bits/char`);
+
+  // Step 3: LLM Classification
+  const llmResult = await classifyWithLLM(
+    scanResult.matchedValue || "",
+    scanResult.secretType || "generic",
+    diff
+  );
+
+  console.log(`   Step 3  : LLM — ${llmResult.riskLevel} (${llmResult.mode})`);
+
+  // Step 4: Generate secretId
+  const secretId = encodeSecretId(scanResult.secretType || "generic", repo);
+
+  // Step 5: Record incident
+  const incident: Incident = {
+    id: commitSha.substring(0, 8),
+    repo,
+    commitSha,
+    secretType: scanResult.secretType || "unknown",
+    status: "detected",
+    riskLevel: llmResult.riskLevel,
+    detectedAt: new Date().toISOString(),
+    creTriggered: false,
+  };
+  incidents.push(incident);
+
+  // Step 6: Push payload ke CRE pending queue (untuk cre simulate lokal)
+  const crePayload: CREPendingPayload = {
+    secretType: scanResult.secretType || "generic",
+    matchedValue: scanResult.matchedValue || "",
+    riskLevel: llmResult.riskLevel,
+    repo,
+    commitSha,
+    secretId,
+    createdAt: new Date().toISOString(),
+  };
+  crePendingQueue.push(crePayload);
+  console.log(`📋 CRE payload queued — ${crePendingQueue.length} pending`);
+  console.log(`   Fetch with: GET /cre/pending`);
+
+  // Step 7: Juga trigger CRE (real atau mock)
+  console.log(`\n🔄 Triggering CRE workflow...`);
+  incident.status = "rotating";
+
+  const creResult = await triggerCREWorkflow({
+    secretId,
+    repo,
+    commitSha,
+    secretType: scanResult.secretType || "generic",
+    vaultUrl: "http://localhost:8200",
+  });
+
+  if (creResult.success) {
+    incident.creTriggered = true;
+
+    // Mock mode: submit on-chain langsung (CRE tidak akan callback)
+    const isMockMode =
+      !process.env.CRE_TRIGGER_URL ||
+      process.env.CRE_TRIGGER_URL === "https://your-cre-endpoint/scan" ||
+      creResult.jobId?.startsWith("mock-");
+
+    if (isMockMode) {
+      const mockIncidentCommitment = generateMockCommitment(secretId, commitSha, "incident");
+      const mockNewCommitment      = generateMockCommitment(secretId, commitSha, "rotation");
+      const riskUint               = llmResult.riskLevel === "CRITICAL" ? 3
+                                    : llmResult.riskLevel === "HIGH"     ? 2
+                                    : 1;
+
+      await submitOnChain({
+        secretId,
+        incidentCommitment: mockIncidentCommitment,
+        newCommitment: mockNewCommitment,
+        riskLevel: riskUint,
+        repo,
+        rotated: true,
+      });
+
+      incident.status = "rotated";
+      console.log(`\n✅ DEMO complete (mock) — check Sepolia Etherscan & Frontend`);
+    } else {
+      // Real CRE mode — on-chain via /cre-callback
+      console.log(`✅ CRE triggered — waiting for /cre-callback`);
+    }
+  } else {
+    console.error(`❌ CRE trigger failed: ${creResult.error}`);
+  }
+}
 
 // ── MAIN: GitHub Webhook ─────────────────────────────────────────
 app.post("/webhook", async (req: Request, res: Response) => {
@@ -352,11 +526,12 @@ async function submitOnChain(params: {
 
 app.listen(PORT, () => {
   console.log(`\n🛡️  AEGISOE Backend running`);
-  console.log(`   Port    : ${PORT}`);
-  console.log(`   Health  : http://localhost:${PORT}/health`);
-  console.log(`   Webhook : http://localhost:${PORT}/webhook`);
-  console.log(`   Incidents: http://localhost:${PORT}/incidents`);
-  console.log(`\n   ⚡ Waiting for GitHub webhooks...\n`);
+  console.log(`   Port      : ${PORT}`);
+  console.log(`   Health    : http://localhost:${PORT}/health`);
+  console.log(`   Webhook   : http://localhost:${PORT}/webhook`);
+  console.log(`   Demo      : POST http://localhost:${PORT}/demo/trigger`);
+  console.log(`   Incidents : http://localhost:${PORT}/incidents`);
+  console.log(`\n   ⚡ Waiting for webhooks or demo triggers...\n`);
 });
 
 export default app;

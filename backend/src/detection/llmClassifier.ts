@@ -6,7 +6,7 @@
  *   2. Entropy (entropyAnalyzer.ts)
  *   3. LLM (llmClassifier.ts) ← ini
  *
- * Mengirim kandidat secret ke Groq API untuk konfirmasi:
+ * Mengirim kandidat secret ke Groq API (LLaMA 3) untuk konfirmasi:
  * - Apakah ini benar leaked secret atau false positive?
  * - Risk level: CRITICAL / HIGH / MEDIUM / NONE
  *
@@ -36,7 +36,7 @@ export async function classifyWithLLM(
   }
 
   try {
-    console.log(`   🤖 LLM classifying secret candidate...`);
+    console.log(`   🤖 LLM classifying secret candidate (Groq)...`);
 
     // Mask secret value — hanya kirim prefix + panjang, bukan full value
     const maskedValue = maskSecret(matchedValue);

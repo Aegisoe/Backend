@@ -369,6 +369,7 @@ app.post("/scan/repo", async (req: Request, res: Response) => {
     repoUrl,
     branch = "main",
     mode = "simulate",
+    autoFix = false,
     maxFiles = 50,
   } = req.body || {};
 
@@ -377,13 +378,14 @@ app.post("/scan/repo", async (req: Request, res: Response) => {
     return;
   }
 
-  console.log(`\n🔍 REPO SCAN REQUEST: ${repoUrl} (branch: ${branch}, mode: ${mode})`);
+  console.log(`\n🔍 REPO SCAN REQUEST: ${repoUrl} (branch: ${branch}, mode: ${mode}, autoFix: ${autoFix})`);
 
   try {
     const result = await scanRepository({
       repoUrl,
       branch,
       mode,
+      autoFix,
       maxFiles: Math.min(maxFiles, 100), // cap at 100 files
     });
 

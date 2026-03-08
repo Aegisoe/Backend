@@ -3,12 +3,29 @@ import { calculateEntropy } from "./entropyAnalyzer";
 // ── Secret Patterns ──────────────────────────────────────────────
 
 const SECRET_PATTERNS: Record<string, RegExp> = {
-  // sk-[a-zA-Z0-9_-] covers both old (sk-xxx) and new (sk-proj-xxx) OpenAI formats
-  openai:   /sk-[a-zA-Z0-9_\-]{20,}/g,
-  aws:      /AKIA[0-9A-Z]{16}/g,
-  github:   /ghp_[a-zA-Z0-9]{36}/g,
-  jwt:      /eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}/g,
-  generic:  /[a-zA-Z0-9_\-]{32,64}/g,
+  // ── Well-known API keys ──
+  openai:       /sk-[a-zA-Z0-9_\-]{20,}/g,
+  aws:          /AKIA[0-9A-Z]{16}/g,
+  github:       /gh[ps]_[a-zA-Z0-9]{36,}/g,
+  gitlab:       /glpat-[a-zA-Z0-9_\-]{20,}/g,
+  slack_webhook: /https:\/\/hooks\.slack\.com\/services\/T[a-zA-Z0-9_]+\/B[a-zA-Z0-9_]+\/[a-zA-Z0-9_]+/g,
+  slack_token:  /xox[bpras]-[a-zA-Z0-9\-]+/g,
+  stripe:       /sk_live_[a-zA-Z0-9]{24,}/g,
+  stripe_test:  /sk_test_[a-zA-Z0-9]{24,}/g,
+  google_api:   /AIza[a-zA-Z0-9_\-]{35}/g,
+  firebase:     /AAAA[a-zA-Z0-9_\-]{7}:[a-zA-Z0-9_\-]{140,}/g,
+  twilio:       /SK[a-f0-9]{32}/g,
+  sendgrid:     /SG\.[a-zA-Z0-9_\-]{22}\.[a-zA-Z0-9_\-]{43}/g,
+  mailgun:      /key-[a-zA-Z0-9]{32}/g,
+  jwt:          /eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}/g,
+  // ── Private keys ──
+  private_key:  /-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/g,
+  // ── Database / connection strings ──
+  database_url: /(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis|amqp):\/\/[^\s'"]+/g,
+  // ── .env style: KEY=value (sensitive variable names) ──
+  env_secret:   /(?:^|[\s;])(?:PASSWORD|SECRET|TOKEN|API_KEY|APIKEY|API_SECRET|ACCESS_KEY|PRIVATE_KEY|DB_PASSWORD|DATABASE_URL|MONGO_URI|REDIS_URL|AUTH_TOKEN|JWT_SECRET|ENCRYPTION_KEY|MASTER_KEY|CLIENT_SECRET|APP_SECRET|SESSION_SECRET)[=:]\s*['"]?([^\s'"#]+)['"]?/gi,
+  // ── Generic high-entropy (last resort) ──
+  generic:      /[a-zA-Z0-9_\-]{32,64}/g,
 };
 
 // Entropy threshold — string dengan entropy tinggi kemungkinan besar secret
@@ -107,14 +124,19 @@ export function scanTextForAllSecrets(text: string): SecretMatch[] {
     for (const [type, pattern] of Object.entries(SECRET_PATTERNS)) {
       if (type === "generic") continue;
 
-      const regex = new RegExp(pattern.source, "g");
+      const regex = new RegExp(pattern.source, pattern.flags);
       let match;
       while ((match = regex.exec(line)) !== null) {
-        const value = match[0];
+        // For env_secret pattern, use captured group (the value), not full match
+        const value = type === "env_secret" && match[1] ? match[1] : match[0];
         if (seen.has(value)) continue;
+        if (value.length < 8) continue; // skip very short values
 
+        // private_key and database_url don't need entropy check
+        const skipEntropyCheck = ["private_key", "database_url", "slack_webhook", "env_secret"].includes(type);
         const entropy = calculateEntropy(value);
-        if (entropy > ENTROPY_THRESHOLD) {
+
+        if (skipEntropyCheck || entropy > ENTROPY_THRESHOLD) {
           seen.add(value);
           matches.push({
             secretType: type,

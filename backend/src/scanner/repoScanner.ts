@@ -17,6 +17,7 @@
 
 import { scanTextForAllSecrets, SecretMatch } from "../detection/regexScanner";
 import { classifyWithLLM, LLMClassifyResult } from "../detection/llmClassifier";
+import { isSensitiveFile, createAutoFixPR, AutoFixResult } from "./autoFixPR";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -24,6 +25,7 @@ export interface RepoScanOptions {
   repoUrl: string;
   branch?: string;
   mode?: "simulate" | "onchain";
+  autoFix?: boolean; // create PR to fix leaked secrets
   token?: string; // GitHub API token (optional, higher rate limit)
   maxFiles?: number; // limit files to scan (default 50)
 }
@@ -47,12 +49,15 @@ export interface RepoScanResult {
   totalFilesScanned: number;
   totalFilesInRepo: number;
   findings: Finding[];
+  sensitiveFiles: string[]; // files that should NOT be in repo (.env, .pem, etc.)
   summary: {
     critical: number;
     high: number;
     medium: number;
     total: number;
+    sensitiveFilesCount: number;
   };
+  autoFix?: AutoFixResult;
   error?: string;
 }
 
@@ -305,7 +310,8 @@ export async function scanRepository(options: RepoScanOptions): Promise<RepoScan
       totalFilesScanned: 0,
       totalFilesInRepo: 0,
       findings: [],
-      summary: { critical: 0, high: 0, medium: 0, total: 0 },
+      sensitiveFiles: [],
+      summary: { critical: 0, high: 0, medium: 0, total: 0, sensitiveFilesCount: 0 },
       error: "Invalid GitHub URL. Expected: https://github.com/owner/repo",
     };
   }
@@ -318,6 +324,18 @@ export async function scanRepository(options: RepoScanOptions): Promise<RepoScan
     // 2. Fetch repo tree
     const tree = await fetchRepoTree(owner, repo, branch, token);
     const allFiles = tree.filter((e) => e.type === "blob");
+
+    // 2.5. Detect sensitive files that should NOT be in repo
+    const sensitiveFiles = allFiles
+      .filter((e) => e.type === "blob" && isSensitiveFile(e.path))
+      .map((e) => e.path);
+
+    if (sensitiveFiles.length > 0) {
+      console.log(`   ⚠️  Sensitive files found: ${sensitiveFiles.length}`);
+      for (const f of sensitiveFiles) {
+        console.log(`      - ${f}`);
+      }
+    }
 
     // 3. Filter scannable files + sort by priority
     const scannableFiles = allFiles
@@ -388,13 +406,17 @@ export async function scanRepository(options: RepoScanOptions): Promise<RepoScan
       high: findings.filter((f) => f.riskLevel === "HIGH").length,
       medium: findings.filter((f) => f.riskLevel === "MEDIUM").length,
       total: findings.length,
+      sensitiveFilesCount: sensitiveFiles.length,
     };
 
     const duration = Date.now() - startTime;
     console.log(`\n✅ Scan complete: ${summary.total} secrets found in ${duration}ms`);
     console.log(`   CRITICAL: ${summary.critical} | HIGH: ${summary.high} | MEDIUM: ${summary.medium}`);
+    if (sensitiveFiles.length > 0) {
+      console.log(`   Sensitive files: ${sensitiveFiles.length} (should not be in repo)`);
+    }
 
-    return {
+    const result: RepoScanResult = {
       status: filesScanned === scannableFiles.length ? "completed" : "partial",
       repo: repoFullName,
       branch,
@@ -402,8 +424,24 @@ export async function scanRepository(options: RepoScanOptions): Promise<RepoScan
       totalFilesScanned: filesScanned,
       totalFilesInRepo: allFiles.length,
       findings,
+      sensitiveFiles,
       summary,
     };
+
+    // 7. Auto-fix: create PR to remove leaked secrets
+    if (options.autoFix && token && (findings.length > 0 || sensitiveFiles.length > 0)) {
+      console.log(`\n🔧 Auto-fix enabled — creating PR...`);
+      result.autoFix = await createAutoFixPR(
+        owner,
+        repo,
+        branch,
+        findings,
+        sensitiveFiles,
+        token
+      );
+    }
+
+    return result;
   } catch (err: any) {
     console.error(`❌ Repo scan error: ${err.message}`);
     return {
@@ -414,7 +452,8 @@ export async function scanRepository(options: RepoScanOptions): Promise<RepoScan
       totalFilesScanned: 0,
       totalFilesInRepo: 0,
       findings: [],
-      summary: { critical: 0, high: 0, medium: 0, total: 0 },
+      sensitiveFiles: [],
+      summary: { critical: 0, high: 0, medium: 0, total: 0, sensitiveFilesCount: 0 },
       error: err.message,
     };
   }

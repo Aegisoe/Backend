@@ -3,7 +3,8 @@ import { calculateEntropy } from "./entropyAnalyzer";
 // ── Secret Patterns ──────────────────────────────────────────────
 
 const SECRET_PATTERNS: Record<string, RegExp> = {
-  openai:   /sk-[a-zA-Z0-9]{20,}/g,
+  // sk-[a-zA-Z0-9_-] covers both old (sk-xxx) and new (sk-proj-xxx) OpenAI formats
+  openai:   /sk-[a-zA-Z0-9_\-]{20,}/g,
   aws:      /AKIA[0-9A-Z]{16}/g,
   github:   /ghp_[a-zA-Z0-9]{36}/g,
   jwt:      /eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}/g,

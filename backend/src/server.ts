@@ -6,6 +6,11 @@ import { classifyWithLLM } from "./detection/llmClassifier";
 import { triggerCREWorkflow } from "./cre/triggerWorkflow";
 import { shouldAutoRotate } from "./policy/policyChecker";
 import { encodeSecretId } from "./aegisoeTypes";
+import {
+  recordIncidentOnChain,
+  recordRotationOnChain,
+  generateMockCommitment,
+} from "./blockchain/onChainWriter";
 
 dotenv.config();
 
@@ -77,7 +82,50 @@ app.get("/health", (_req: Request, res: Response) => {
     status: "ok",
     service: "AEGISOE Backend",
     timestamp: new Date().toISOString(),
+    onChain: !!process.env.OPERATOR_PRIVATE_KEY,
+    creMode: process.env.CRE_TRIGGER_URL ? "real" : "mock",
   });
+});
+
+// ── CRE Callback — dipanggil oleh CRE setelah workflow selesai ───
+// CRE mengirim commitments → Backend submit on-chain tx
+app.post("/cre-callback", async (req: Request, res: Response) => {
+  // Verifikasi X-CRE-Secret header
+  const secret = process.env.CRE_CALLBACK_SECRET;
+  if (secret && req.headers["x-cre-secret"] !== secret) {
+    console.warn("❌ CRE callback rejected — invalid X-CRE-Secret");
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  const {
+    secretId,
+    incidentCommitment,
+    newCommitment,
+    riskLevel,
+    repo,
+    rotated,
+  } = req.body as {
+    secretId: string;
+    incidentCommitment: string;
+    newCommitment: string;
+    riskLevel: number;
+    repo: string;
+    rotated: boolean;
+    githubRevoked: boolean;
+    processedAt: string;
+  };
+
+  console.log(`\n📥 CRE callback received`);
+  console.log(`   SecretId  : ${secretId}`);
+  console.log(`   Rotated   : ${rotated}`);
+
+  res.status(200).json({ message: "Callback received, submitting on-chain..." });
+
+  // Submit on-chain secara async
+  submitOnChain({ secretId, incidentCommitment, newCommitment, riskLevel, repo, rotated }).catch(
+    (err) => console.error("❌ On-chain submission failed:", err.message)
+  );
 });
 
 // Incident log — untuk frontend
@@ -234,8 +282,69 @@ async function processWebhook(
     incident.creTriggered = true;
     console.log(`✅ CRE workflow triggered successfully`);
     console.log(`   Job ID : ${creResult.jobId}`);
+
+    // Mock mode: CRE tidak akan callback → submit on-chain langsung dengan mock commitments
+    const isMockMode =
+      !process.env.CRE_TRIGGER_URL ||
+      process.env.CRE_TRIGGER_URL === "https://your-cre-endpoint/scan" ||
+      creResult.jobId?.startsWith("mock-");
+
+    if (isMockMode) {
+      const mockIncidentCommitment = generateMockCommitment(secretId, commitSha, "incident");
+      const mockNewCommitment      = generateMockCommitment(secretId, commitSha, "rotation");
+      const riskUint               = llmResult.riskLevel === "CRITICAL" ? 3
+                                    : llmResult.riskLevel === "HIGH"     ? 2
+                                    : 1;
+      await submitOnChain({
+        secretId,
+        incidentCommitment: mockIncidentCommitment,
+        newCommitment: mockNewCommitment,
+        riskLevel: riskUint,
+        repo,
+        rotated: true,
+      });
+    }
+    // Real CRE mode: on-chain submission akan terjadi via /cre-callback
   } else {
     console.error(`❌ CRE trigger failed: ${creResult.error}`);
+  }
+}
+
+// ── Shared on-chain submission logic ────────────────────────────
+
+async function submitOnChain(params: {
+  secretId: string;
+  incidentCommitment: string;
+  newCommitment: string;
+  riskLevel: number;
+  repo: string;
+  rotated: boolean;
+}): Promise<void> {
+  if (!process.env.OPERATOR_PRIVATE_KEY) {
+    console.warn("⚠️  OPERATOR_PRIVATE_KEY not set — skipping on-chain submission");
+    console.warn("   Set OPERATOR_PRIVATE_KEY in Railway to enable on-chain recording");
+    return;
+  }
+
+  try {
+    const incidentTxHash = await recordIncidentOnChain({
+      secretId: params.secretId,
+      incidentCommitment: params.incidentCommitment,
+      riskLevel: params.riskLevel,
+      repo: params.repo,
+    });
+    console.log(`\n✅ Incident recorded on-chain: ${incidentTxHash}`);
+
+    if (params.rotated) {
+      const rotationTxHash = await recordRotationOnChain({
+        secretId: params.secretId,
+        oldCommitment: params.incidentCommitment,
+        newCommitment: params.newCommitment,
+      });
+      console.log(`✅ Rotation recorded on-chain: ${rotationTxHash}`);
+    }
+  } catch (err: any) {
+    console.error(`❌ On-chain submission error: ${err.message}`);
   }
 }
 

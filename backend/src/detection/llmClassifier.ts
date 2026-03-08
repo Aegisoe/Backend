@@ -6,11 +6,11 @@
  *   2. Entropy (entropyAnalyzer.ts)
  *   3. LLM (llmClassifier.ts) ← ini
  *
- * Mengirim kandidat secret ke OpenAI API untuk konfirmasi:
+ * Mengirim kandidat secret ke Groq API untuk konfirmasi:
  * - Apakah ini benar leaked secret atau false positive?
  * - Risk level: CRITICAL / HIGH / MEDIUM / NONE
  *
- * Jika OPENAI_API_KEY tidak di-set, fallback ke deterministic mode.
+ * Jika GROQ_API_KEY tidak di-set, fallback ke deterministic mode.
  */
 
 // ── Types ────────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ export async function classifyWithLLM(
   secretType: string,
   context: string
 ): Promise<LLMClassifyResult> {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = process.env.GROQ_API_KEY;
 
   if (!apiKey) {
     return fallbackClassify(secretType);
@@ -43,14 +43,14 @@ export async function classifyWithLLM(
 
     const prompt = buildPrompt(maskedValue, secretType, context);
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: "llama-3.3-70b-versatile",
         messages: [
           {
             role: "system",
@@ -146,7 +146,7 @@ function maskSecret(value: string): string {
 }
 
 // ── Fallback (tanpa LLM) ────────────────────────────────────────
-// Digunakan jika OPENAI_API_KEY tidak di-set atau API error
+// Digunakan jika GROQ_API_KEY tidak di-set atau API error
 
 function fallbackClassify(secretType: string): LLMClassifyResult {
   const riskMap: Record<string, LLMClassifyResult["riskLevel"]> = {

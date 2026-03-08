@@ -1,4 +1,4 @@
-import express, { Request, Response, NextFunction } from "express";
+import express, { Express, Request, Response, NextFunction } from "express";
 import * as crypto from "crypto";
 import * as dotenv from "dotenv";
 import { scanDiffForSecrets } from "./detection/regexScanner";
@@ -14,7 +14,7 @@ import {
 
 dotenv.config();
 
-const app = express();
+const app: Express = express();
 const PORT = process.env.PORT || 3000;
 
 // ── In-memory incident log (untuk demo) ─────────────────────────

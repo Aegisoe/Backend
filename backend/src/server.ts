@@ -213,12 +213,14 @@ app.post("/demo/trigger", async (req: Request, res: Response) => {
     secretValue = "sk-proj-DEMO1234567890abcdefghijklmnopqrstuvwxyz",
     repo = "Aegisoe/demo-repo",
     commitSha = crypto.randomBytes(20).toString("hex"),
+    creSimulate = false, // true = hanya detect + queue, biarkan CRE simulate handle on-chain
   } = req.body || {};
 
   console.log(`\n🎯 DEMO TRIGGER received`);
-  console.log(`   SecretType : ${secretType}`);
-  console.log(`   Repo       : ${repo}`);
-  console.log(`   CommitSha  : ${commitSha}`);
+  console.log(`   SecretType  : ${secretType}`);
+  console.log(`   Repo        : ${repo}`);
+  console.log(`   CommitSha   : ${commitSha}`);
+  console.log(`   CRE Simulate: ${creSimulate ? "ON — skip mock CRE, wait for CRE callback" : "OFF — mock CRE + on-chain"}`);
 
   // Langsung jalankan pipeline detection → on-chain (skip HMAC)
   const simulatedDiff = `
@@ -229,14 +231,17 @@ app.post("/demo/trigger", async (req: Request, res: Response) => {
   `;
 
   res.status(200).json({
-    message: "Demo triggered — processing pipeline...",
+    message: creSimulate
+      ? "Demo triggered — detection only, waiting for CRE simulate callback..."
+      : "Demo triggered — processing pipeline...",
     commitSha,
     secretType,
     repo,
+    creSimulate,
   });
 
   // Jalankan async pipeline
-  processDemoTrigger(simulatedDiff, repo, commitSha).catch((err) => {
+  processDemoTrigger(simulatedDiff, repo, commitSha, creSimulate).catch((err) => {
     console.error("❌ Demo trigger error:", err.message);
   });
 });
@@ -244,7 +249,8 @@ app.post("/demo/trigger", async (req: Request, res: Response) => {
 async function processDemoTrigger(
   diff: string,
   repo: string,
-  commitSha: string
+  commitSha: string,
+  creSimulate: boolean = false
 ): Promise<void> {
   // Step 1-2: Regex + Entropy scan
   const scanResult = scanDiffForSecrets(diff);
@@ -296,6 +302,15 @@ async function processDemoTrigger(
   crePendingQueue.push(crePayload);
   console.log(`📋 CRE payload queued — ${crePendingQueue.length} pending`);
   console.log(`   Fetch with: GET /cre/pending`);
+
+  // ── creSimulate mode: STOP HERE — CRE simulate akan handle via /cre-callback ──
+  if (creSimulate) {
+    console.log(`\n⏸️  CRE Simulate mode — waiting for CRE callback to handle on-chain...`);
+    console.log(`   Run: cre workflow simulate ./incident-response --http-payload @payload.json --target staging-settings`);
+    incident.status = "rotating";
+    incident.creTriggered = true;
+    return;
+  }
 
   // Step 7: Juga trigger CRE (real atau mock)
   console.log(`\n🔄 Triggering CRE workflow...`);

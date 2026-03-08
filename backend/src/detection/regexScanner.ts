@@ -74,3 +74,79 @@ export function scanDiffForSecrets(diff: string): ScanResult {
     entropy: null,
   };
 }
+
+// ── Multi-match Scanner (untuk Repo Scanner) ────────────────────
+// Scan seluruh text dan return SEMUA secret yang ditemukan
+
+export interface SecretMatch {
+  secretType: string;
+  matchedValue: string;
+  maskedValue: string;
+  entropy: number;
+  line: number;
+}
+
+function maskSecretValue(value: string): string {
+  if (value.length <= 10) return "***";
+  return `${value.substring(0, 7)}...${"*".repeat(6)} (${value.length} chars)`;
+}
+
+export function scanTextForAllSecrets(text: string): SecretMatch[] {
+  const matches: SecretMatch[] = [];
+  const lines = text.split("\n");
+  const seen = new Set<string>(); // deduplicate exact matches
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Skip comment-only lines and very short lines
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("#")) continue;
+
+    // Check known patterns first
+    for (const [type, pattern] of Object.entries(SECRET_PATTERNS)) {
+      if (type === "generic") continue;
+
+      const regex = new RegExp(pattern.source, "g");
+      let match;
+      while ((match = regex.exec(line)) !== null) {
+        const value = match[0];
+        if (seen.has(value)) continue;
+
+        const entropy = calculateEntropy(value);
+        if (entropy > ENTROPY_THRESHOLD) {
+          seen.add(value);
+          matches.push({
+            secretType: type,
+            matchedValue: value,
+            maskedValue: maskSecretValue(value),
+            entropy,
+            line: i + 1,
+          });
+        }
+      }
+    }
+
+    // Generic high-entropy fallback
+    const genericRegex = new RegExp(SECRET_PATTERNS.generic.source, "g");
+    let gMatch;
+    while ((gMatch = genericRegex.exec(line)) !== null) {
+      const value = gMatch[0];
+      if (seen.has(value)) continue;
+
+      const entropy = calculateEntropy(value);
+      if (entropy > ENTROPY_THRESHOLD + 0.5) {
+        seen.add(value);
+        matches.push({
+          secretType: "generic",
+          matchedValue: value,
+          maskedValue: maskSecretValue(value),
+          entropy,
+          line: i + 1,
+        });
+      }
+    }
+  }
+
+  return matches;
+}

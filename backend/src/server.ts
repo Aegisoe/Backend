@@ -11,6 +11,7 @@ import {
   recordRotationOnChain,
   generateMockCommitment,
 } from "./blockchain/onChainWriter";
+import { scanRepository } from "./scanner/repoScanner";
 
 dotenv.config();
 
@@ -362,6 +363,85 @@ async function processDemoTrigger(
   }
 }
 
+// ── Repo Scanner — scan seluruh repo GitHub untuk leaked secrets ─
+app.post("/scan/repo", async (req: Request, res: Response) => {
+  const {
+    repoUrl,
+    branch = "main",
+    mode = "simulate",
+    maxFiles = 50,
+  } = req.body || {};
+
+  if (!repoUrl) {
+    res.status(400).json({ error: "repoUrl is required" });
+    return;
+  }
+
+  console.log(`\n🔍 REPO SCAN REQUEST: ${repoUrl} (branch: ${branch}, mode: ${mode})`);
+
+  try {
+    const result = await scanRepository({
+      repoUrl,
+      branch,
+      mode,
+      maxFiles: Math.min(maxFiles, 100), // cap at 100 files
+    });
+
+    // On-chain mode: record each finding on-chain
+    if (mode === "onchain" && result.findings.length > 0 && process.env.OPERATOR_PRIVATE_KEY) {
+      console.log(`\n⛓️  Recording ${result.findings.length} findings on-chain...`);
+      const txHashes: string[] = [];
+
+      for (const finding of result.findings) {
+        try {
+          const secretId = encodeSecretId(finding.secretType, result.repo);
+          const commitment = generateMockCommitment(secretId, finding.file, "repo-scan");
+          const riskUint = finding.riskLevel === "CRITICAL" ? 3
+                         : finding.riskLevel === "HIGH"     ? 2
+                         : 1;
+
+          await submitOnChain({
+            secretId,
+            incidentCommitment: commitment,
+            newCommitment: generateMockCommitment(secretId, finding.file, "rotation"),
+            riskLevel: riskUint,
+            repo: result.repo,
+            rotated: false,
+          });
+          txHashes.push(secretId);
+        } catch (err: any) {
+          console.error(`   ❌ On-chain error for ${finding.file}: ${err.message}`);
+        }
+      }
+
+      (result as any).onChain = { txHashes, recorded: txHashes.length };
+    }
+
+    // Also add to in-memory incidents for dashboard
+    for (const finding of result.findings) {
+      incidents.push({
+        id: crypto.randomBytes(4).toString("hex"),
+        repo: result.repo,
+        commitSha: `scan-${Date.now()}`,
+        secretType: finding.secretType,
+        status: mode === "onchain" ? "rotated" : "detected",
+        riskLevel: finding.riskLevel,
+        detectedAt: new Date().toISOString(),
+        creTriggered: false,
+      });
+    }
+
+    res.json(result);
+  } catch (err: any) {
+    console.error(`❌ Repo scan failed: ${err.message}`);
+    res.status(500).json({
+      status: "error",
+      error: err.message,
+      repo: repoUrl,
+    });
+  }
+});
+
 // ── MAIN: GitHub Webhook ─────────────────────────────────────────
 app.post("/webhook", async (req: Request, res: Response) => {
   const rawBody = req.body as Buffer;
@@ -590,8 +670,9 @@ app.listen(PORT, () => {
   console.log(`   Health    : http://localhost:${PORT}/health`);
   console.log(`   Webhook   : http://localhost:${PORT}/webhook`);
   console.log(`   Demo      : POST http://localhost:${PORT}/demo/trigger`);
+  console.log(`   RepoScan  : POST http://localhost:${PORT}/scan/repo`);
   console.log(`   Incidents : http://localhost:${PORT}/incidents`);
-  console.log(`\n   ⚡ Waiting for webhooks or demo triggers...\n`);
+  console.log(`\n   ⚡ Waiting for webhooks, demo triggers, or repo scans...\n`);
 });
 
 export default app;
